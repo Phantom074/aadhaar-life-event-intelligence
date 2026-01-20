@@ -15,7 +15,6 @@ import sys
 # -------------------------------------------------
 # Base directory (robust path handling)
 # -------------------------------------------------
-# BASE_DIR = Path(__file__).resolve().parent
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(BASE_DIR.parent))
 
@@ -86,109 +85,112 @@ def run_aleis_pipeline():
     anomaly_threshold = config["thresholds"]["anomaly_zscore"]
 
     # ---- Load datasets ----
-    enrol_df = load_dataset(
-        BASE_DIR / "data" / "raw" / "enrolment" / "enrolment.csv"
-    )
-
-    demo_df = load_dataset(
-        BASE_DIR / "data" / "raw" / "demographic_updates" / "demographic.csv"
-    )
+    enrol_df = load_dataset(BASE_DIR / "data" / "raw" / "enrolment" / "enrolment.csv")
+    demo_df = load_dataset(BASE_DIR / "data" / "raw" / "demographic_updates" / "demographic.csv")
+    
+    # Load Biometric dataset to ensure all three sources are reflected
+    bio_path = BASE_DIR / "data" / "raw" / "biometric" / "biometric.csv"
+    bio_df = load_dataset(bio_path) if bio_path.exists() else pd.DataFrame()
 
     # ---- Basic validation ----
     check_empty(enrol_df)
     check_empty(demo_df)
 
-    # ---- Cleaning ----
-    enrol_df = clean_common_fields(enrol_df)
-    demo_df = clean_common_fields(demo_df)
+    # ---- Cleaning & Transformation ----
+    enrol_df = add_time_features(clean_common_fields(enrol_df), "date")
+    demo_df = add_time_features(clean_common_fields(demo_df), "date")
+    if not bio_df.empty:
+        bio_df = add_time_features(clean_common_fields(bio_df), "date")
 
-    # ---- Transformation ----
-    enrol_df = add_time_features(enrol_df, "date")
-    demo_df = add_time_features(demo_df, "date")
-
-    # ---- Aggregation (monthly, district-level) ----
+    # ---- Aggregation (Summing columns to prevent empty values) ----
+    # 1. New Enrolments from enrolment file
     enrol_agg = aggregate_monthly(
         enrol_df,
         group_cols=["state", "district", "year", "month"],
         value_col="enrolments"
     )
 
+    # 2. Total Updates from demographic file (Renaming 'enrolments' to 'total_updates')
     demo_agg = aggregate_monthly(
         demo_df,
         group_cols=["state", "district", "year", "month"],
-        value_col="total_updates"
-    )
+        value_col="enrolments"
+    ).rename(columns={"enrolments": "total_updates"})
+
+    # 3. Biometric Updates from biometric file
+    if not bio_df.empty:
+        bio_agg = aggregate_monthly(
+            bio_df,
+            group_cols=["state", "district", "year", "month"],
+            value_col="total_updates"
+        ).rename(columns={"total_updates": "biometric_updates"})
+    else:
+        bio_agg = pd.DataFrame()
+
+    # ---- Merge everything into a single consolidated view ----
+    consolidated_agg = pd.merge(
+        enrol_agg, demo_agg, 
+        on=["state", "district", "year", "month"], 
+        how="outer"
+    ).fillna(0)
+
+    if not bio_agg.empty:
+        consolidated_agg = pd.merge(
+            consolidated_agg, bio_agg, 
+            on=["state", "district", "year", "month"], 
+            how="outer"
+        ).fillna(0)
 
     # ---- Validation checks ----
-    validate_non_negative(enrol_agg, "enrolments")
-    validate_non_negative(demo_agg, "total_updates")
-    check_region_coverage(enrol_agg, "district")
+    validate_non_negative(consolidated_agg, "enrolments")
+    validate_non_negative(consolidated_agg, "total_updates")
+    check_region_coverage(consolidated_agg, "district")
 
     # ---- Feature Engineering ----
-    enrol_agg = enrolment_velocity(enrol_agg, "enrolments")
+    consolidated_agg = enrolment_velocity(consolidated_agg, "enrolments")
 
-    demo_agg["temporal_concentration"] = (
-        demo_agg
+    consolidated_agg["temporal_concentration"] = (
+        consolidated_agg
         .groupby(["state", "district"])["total_updates"]
         .transform(temporal_concentration)
     )
 
-    # Row-level diversity feature (if columns exist)
-    if {"address_updates", "mobile_updates"}.issubset(demo_df.columns):
-        demo_df["update_diversity"] = demo_df.apply(update_diversity, axis=1)
-
     # ---- Indicator Computation (LEPI) ----
-    demo_agg["lepi"] = compute_lepi(
-        freq=demo_agg["total_updates"],
-        diversity=1,  # aggregated proxy
-        temporal=demo_agg["temporal_concentration"],
+    consolidated_agg["lepi"] = compute_lepi(
+        freq=consolidated_agg["total_updates"],
+        diversity=1, 
+        temporal=consolidated_agg["temporal_concentration"],
         weights=lepi_weights
     )
 
     # ---- Anomaly Detection ----
-    demo_agg["anomaly_flag"] = detect_anomalies(
-        demo_agg["lepi"],
+    consolidated_agg["anomaly_flag"] = detect_anomalies(
+        consolidated_agg["lepi"],
         threshold=anomaly_threshold
     )
 
-    # ---- Mobility Index (optional) ----
-    if {"address_updates", "mobile_updates"}.issubset(demo_df.columns):
-        demo_df["mobility_index"] = mobility_index(
-            demo_df["address_updates"],
-            demo_df["mobile_updates"],
-            mobility_weights
-        )
-
-    # ---- Save processed outputs ----
+    # ---- Save consolidated outputs ----
     output_dir = BASE_DIR / "data" / "processed" / "monthly"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    demo_agg.to_csv(
+    consolidated_agg.to_csv(
         output_dir / "demo_indicators.csv",
         index=False
     )
 
     # ---- Policy Brief Generation ----
-    anomalies = demo_agg[demo_agg["anomaly_flag"]]
-
+    anomalies = consolidated_agg[consolidated_agg["anomaly_flag"]]
     insight_text = (
         f"{len(anomalies)} districts exhibit unusually high life-event intensity, "
-        f"suggesting elevated migration, employment transitions, or administrative stress."
+        f"suggesting elevated migration or administrative stress."
     )
-
     policy_brief = generate_brief(insight_text)
 
-    report_path = BASE_DIR / "reports" / "monthly_policy_brief.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(report_path, "w") as f:
+    with open(BASE_DIR / "reports" / "monthly_policy_brief.md", "w") as f:
         f.write(policy_brief)
 
-    print("✅ ALEIS Pipeline Completed Successfully.")
+    print(f"✅ ALEIS Pipeline Completed. Data saved to: {output_dir / 'demo_indicators.csv'}")
 
 
-# -------------------------------------------------
-# Entry Point
-# -------------------------------------------------
 if __name__ == "__main__":
     run_aleis_pipeline()
