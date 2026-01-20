@@ -1,5 +1,7 @@
 # Aadhaar Life-Event Intelligence System (ALEIS)
 
+Steps to run --> unzip the data file --> make the venv and activate it --> install the req file --> run python main.py --> data processed --> run streamlit run modern_dash.py -- that's it all set
+
 ## Overview
 The **Aadhaar Life-Event Intelligence System (ALEIS)** is a data analytics and intelligence framework designed to extract meaningful societal insights from **anonymized Aadhaar enrolment and update datasets**.  
 
