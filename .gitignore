@@ -1,12 +1,15 @@
 # Python .gitignore
 __pycache__/
 data/
+**/data/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyd
 *.so
+__pycache__/
+*.pyc
 
 # C extensions, compiled binaries
 *.dll
