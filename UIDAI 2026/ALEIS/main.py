@@ -10,11 +10,14 @@ indicator computation, validation, anomaly detection, and reporting.
 from pathlib import Path
 import yaml
 import pandas as pd
+import sys
 
 # -------------------------------------------------
 # Base directory (robust path handling)
 # -------------------------------------------------
+# BASE_DIR = Path(__file__).resolve().parent
 BASE_DIR = Path(__file__).resolve().parent
+sys.path.append(str(BASE_DIR.parent))
 
 
 # -------------------------------------------------
